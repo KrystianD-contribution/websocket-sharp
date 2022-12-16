@@ -1010,6 +1010,11 @@ namespace WebSocketSharp
       return String.Format ("{0}; {1}", ename, eparams);
     }
 
+    internal static int ToInt32 (this string numericString)
+    {
+      return Int32.Parse (numericString);
+    }
+
     internal static System.Net.IPAddress ToIPAddress (this string value)
     {
       if (value == null || value.Length == 0)
@@ -1059,6 +1064,11 @@ namespace WebSocketSharp
       var val = source.ToHostOrder (sourceOrder);
 
       return BitConverter.ToUInt64 (val, 0);
+    }
+
+    internal static Version ToVersion (this string versionString)
+    {
+      return new Version (versionString);
     }
 
     internal static IEnumerable<string> TrimEach (

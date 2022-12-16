@@ -30,6 +30,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using WebSocketSharp.Net;
@@ -40,11 +41,11 @@ namespace WebSocketSharp
   {
     #region Private Fields
 
-    private string              _entityBody;
-    private byte[]              _entityBodyData;
     private NameValueCollection _headers;
-    private static readonly int _headersMaxLength;
-    private Version             _protocolVersion;
+    private static readonly int _maxMessageHeaderLength;
+    private string              _messageBody;
+    private byte[]              _messageBodyData;
+    private Version             _version;
 
     #endregion
 
@@ -60,7 +61,7 @@ namespace WebSocketSharp
 
     static HttpBase ()
     {
-      _headersMaxLength = 8192;
+      _maxMessageHeaderLength = 8192;
 
       CrLf = "\r\n";
       CrLfHt = "\r\n\t";
@@ -71,9 +72,9 @@ namespace WebSocketSharp
 
     #region Protected Constructors
 
-    protected HttpBase (Version protocolVersion, NameValueCollection headers)
+    protected HttpBase (Version version, NameValueCollection headers)
     {
-      _protocolVersion = protocolVersion;
+      _version = version;
       _headers = headers;
     }
 
@@ -81,9 +82,26 @@ namespace WebSocketSharp
 
     #region Internal Properties
 
-    internal byte[] EntityBodyData {
+    internal byte[] MessageBodyData {
       get {
-        return _entityBodyData;
+        return _messageBodyData;
+      }
+    }
+
+    #endregion
+
+    #region Protected Properties
+
+    protected string HeaderSection {
+      get {
+        var buff = new StringBuilder (64);
+
+        foreach (var key in _headers.AllKeys)
+          buff.AppendFormat ("{0}: {1}{2}", key, _headers[key], CrLf);
+
+        buff.Append (CrLf);
+
+        return buff.ToString ();
       }
     }
 
@@ -91,12 +109,9 @@ namespace WebSocketSharp
 
     #region Public Properties
 
-    public string EntityBody {
+    public bool HasMessageBody {
       get {
-        if (_entityBody == null)
-          _entityBody = getEntityBody ();
-
-        return _entityBody;
+        return _messageBodyData != null;
       }
     }
 
@@ -106,9 +121,20 @@ namespace WebSocketSharp
       }
     }
 
+    public string MessageBody {
+      get {
+        if (_messageBody == null)
+          _messageBody = getMessageBody ();
+
+        return _messageBody;
+      }
+    }
+
+    public abstract string MessageHeader { get; }
+
     public Version ProtocolVersion {
       get {
-        return _protocolVersion;
+        return _version;
       }
     }
 
@@ -116,9 +142,9 @@ namespace WebSocketSharp
 
     #region Private Methods
 
-    private string getEntityBody ()
+    private string getMessageBody ()
     {
-      if (_entityBodyData == null || _entityBodyData.LongLength == 0)
+      if (_messageBodyData == null || _messageBodyData.LongLength == 0)
         return String.Empty;
 
       var contentType = _headers["Content-Type"];
@@ -127,10 +153,10 @@ namespace WebSocketSharp
                 ? HttpUtility.GetEncoding (contentType)
                 : Encoding.UTF8;
 
-      return enc.GetString (_entityBodyData);
+      return enc.GetString (_messageBodyData);
     }
 
-    private static byte[] readEntityBodyFrom (Stream stream, string length)
+    private static byte[] readMessageBodyFrom (Stream stream, string length)
     {
       long len;
 
@@ -153,14 +179,14 @@ namespace WebSocketSharp
                : null;
     }
 
-    private static string[] readHeadersFrom (Stream stream)
+    private static string[] readMessageHeaderFrom (Stream stream)
     {
       var buff = new List<byte> ();
       var cnt = 0;
       Action<int> add =
         i => {
           if (i == -1) {
-            var msg = "The headers could not be read from the data stream.";
+            var msg = "The header could not be read from the data stream.";
 
             throw new EndOfStreamException (msg);
           }
@@ -170,21 +196,21 @@ namespace WebSocketSharp
           cnt++;
         };
 
-      while (true) {
-        var end = stream.ReadByte ().IsEqualTo ('\r', add)
-                  && stream.ReadByte ().IsEqualTo ('\n', add)
-                  && stream.ReadByte ().IsEqualTo ('\r', add)
-                  && stream.ReadByte ().IsEqualTo ('\n', add);
+      var end = false;
 
-        if (cnt > _headersMaxLength) {
-          var msg = "The length of the headers is greater than the max length.";
+      do {
+        end = stream.ReadByte ().IsEqualTo ('\r', add)
+              && stream.ReadByte ().IsEqualTo ('\n', add)
+              && stream.ReadByte ().IsEqualTo ('\r', add)
+              && stream.ReadByte ().IsEqualTo ('\n', add);
+
+        if (cnt > _maxMessageHeaderLength) {
+          var msg = "The length of the header is greater than the max length.";
 
           throw new InvalidOperationException (msg);
         }
-
-        if (end)
-          break;
       }
+      while (!end);
 
       var bytes = buff.ToArray ();
 
@@ -192,6 +218,17 @@ namespace WebSocketSharp
              .Replace (CrLfSp, " ")
              .Replace (CrLfHt, " ")
              .Split (new[] { CrLf }, StringSplitOptions.RemoveEmptyEntries);
+    }
+
+    #endregion
+
+    #region Internal Methods
+
+    internal void WriteTo (Stream stream)
+    {
+      var bytes = ToByteArray ();
+
+      stream.Write (bytes, 0, bytes.Length);
     }
 
     #endregion
@@ -219,13 +256,13 @@ namespace WebSocketSharp
       Exception exception = null;
 
       try {
-        var headers = readHeadersFrom (stream);
-        ret = parser (headers);
+        var header = readMessageHeaderFrom (stream);
+        ret = parser (header);
 
         var contentLen = ret.Headers["Content-Length"];
 
         if (contentLen != null && contentLen.Length > 0)
-          ret._entityBodyData = readEntityBodyFrom (stream, contentLen);
+          ret._messageBodyData = readMessageBodyFrom (stream, contentLen);
       }
       catch (Exception ex) {
         exception = ex;
@@ -236,13 +273,13 @@ namespace WebSocketSharp
       }
 
       if (timeout) {
-        var msg = "A timeout has occurred while reading an HTTP request or response.";
+        var msg = "A timeout has occurred.";
 
         throw new WebSocketException (msg);
       }
 
       if (exception != null) {
-        var msg = "An exception has occurred while reading an HTTP request or response.";
+        var msg = "An exception has occurred.";
 
         throw new WebSocketException (msg, exception);
       }
@@ -256,11 +293,20 @@ namespace WebSocketSharp
 
     public byte[] ToByteArray ()
     {
-      var s = ToString ();
+      var headerData = Encoding.UTF8.GetBytes (MessageHeader);
 
-      return Encoding.UTF8.GetBytes (s);
+      return _messageBodyData != null
+             ? headerData.Concat (_messageBodyData).ToArray ()
+             : headerData;
     }
-    
+
+    public override string ToString ()
+    {
+      return _messageBodyData != null
+             ? MessageHeader + MessageBody
+             : MessageHeader;
+    }
+
     #endregion
   }
 }
